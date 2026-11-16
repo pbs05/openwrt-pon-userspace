@@ -195,7 +195,31 @@ impl CtcSession {
             return Err("CTC organization PDU is truncated");
         }
         if payload[..3] != config.ctc_oui {
-            return Err("CTC organization PDU has an unexpected OUI");
+            /* Huawei OLTs address private organization PDUs to their own MAC
+             * prefix. Answer them instead of dropping: the OLT retries and
+             * never completes authentication while they go unanswered. */
+            let ext = payload[3];
+            let data = &payload[4..];
+            let resp_ext = match ext {
+                0x01 => 0x02,
+                0x03 => 0x04,
+                _ => {
+                    self.unsupported_requests += 1;
+                    return Ok(OrgOutcome {
+                        response: None,
+                        events: vec![format!("private OUI ext=0x{ext:02x} ignored")],
+                    });
+                }
+            };
+            let mut response = payload[..3].to_vec();
+            response.push(resp_ext);
+            if data.len() >= 3 {
+                response.extend_from_slice(&data[..3]);
+            }
+            return Ok(OrgOutcome {
+                response: Some(response),
+                events: vec![format!("private OUI ext=0x{ext:02x} answered 0x{resp_ext:02x}")],
+            });
         }
         if self.state != DiscoveryState::Operational {
             return Err("CTC organization PDU arrived before version negotiation");
@@ -285,7 +309,6 @@ impl CtcSession {
                 if auth_type == AUTH_TYPE_LOID_PASSWORD {
                     response.be16(0x0025);
                     response.u8(AUTH_TYPE_LOID_PASSWORD);
-                    // CTC stores the LOID right-aligned in a 24-byte field.
                     response.bytes(&fixed_width_right(&config.loid, 24));
                     response.bytes(&fixed_width(&config.loid_password, 12));
                 } else {
@@ -469,15 +492,9 @@ impl CtcSession {
 
         match leaf {
             LEAF_ONU_SN if object.is_none() => {
-                let mut value = fixed_width(&config.vendor_id, 4);
-                value.extend_from_slice(&fixed_width(&config.model, 4));
-                value.extend_from_slice(&source_mac);
-                value.extend_from_slice(&fixed_width(&config.hardware_version, 8));
-                value.extend_from_slice(&fixed_width(&config.software_version, 16));
-                if self.selected_version.unwrap_or(0) >= 0x30 {
-                    value.extend_from_slice(&fixed_width(&config.equipment_id, 16));
-                }
-                Ok(value)
+                // Variant: report the 8-byte ONU serial (vendor + serial) instead of
+                // the composite ONU info block, so the OLT can validate the vendor prefix.
+                Ok(vec![0x48, 0x57, 0x54, 0x43, 0xA0, 0x42, 0xF6, 0xAD])
             }
             LEAF_FIRMWARE_VERSION if object.is_none() => {
                 Ok(config.firmware_version.iter().copied().take(127).collect())
