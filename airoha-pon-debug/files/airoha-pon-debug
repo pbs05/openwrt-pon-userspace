@@ -90,6 +90,7 @@ capture_line_state() {
 
 capture_npu_state() {
 	local directory="$WORK_DIR/npu"
+	local path name
 
 	mkdir -p "$directory"
 	write_shell_command "$directory/driver.txt" \
@@ -98,6 +99,12 @@ capture_npu_state() {
 		"tr '\\0' '\\n' < /proc/device-tree/soc/npu@1e900000/firmware-name"
 	write_command "$directory/clock.txt" cat /sys/kernel/debug/clk/npu/clk_rate
 	write_command "$directory/ppe-config.txt" cat /sys/kernel/debug/ppe/config
+	# Read only: collecting a bundle never arms the optional RX sampler.
+	for path in /sys/kernel/debug/airoha_eth-*/pon_rx_samples; do
+		[ -r "$path" ] || continue
+		name="$(safe_name "$(basename "$(dirname "$path")")")"
+		write_command "$directory/$name-pon-rx-samples.txt" cat "$path"
+	done
 	write_command "$directory/ppe-bind.txt" cat /sys/kernel/debug/ppe/bind
 	write_command "$directory/ppe-entries.txt" cat /sys/kernel/debug/ppe/entries
 	write_shell_command "$directory/ppe-summary.txt" \

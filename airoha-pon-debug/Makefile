@@ -4,7 +4,7 @@ include $(TOPDIR)/rules.mk
 
 PKG_NAME:=airoha-pon-debug
 PKG_VERSION:=0.1.0
-PKG_RELEASE:=2
+PKG_RELEASE:=3
 PKG_URL:=https://github.com/pbs05/openwrt-pon-userspace/tree/main/airoha-pon-debug
 
 PKG_LICENSE:=GPL-2.0-only
