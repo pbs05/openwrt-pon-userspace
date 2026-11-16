@@ -27,8 +27,13 @@ const RECEIVE_BUFFER_LEN: usize = 2048;
 
 pub use self::config::OamConfig;
 
-pub fn run_agent(interface: &str, config: OamConfig, control_socket: &Path) -> io::Result<()> {
+pub fn run_agent(
+    interface: &str,
+    mut config: OamConfig,
+    control_socket: &Path,
+) -> io::Result<()> {
     let source_mac = parent_interface_mac(interface)?;
+    config.active_serial_number = active_serial_number(interface)?;
     let socket = PacketSocket::open(interface)?;
     let service_ready = parent_xpon_attribute(interface, "service_ready")?;
     publish_service_ready(service_ready.as_deref(), false);
@@ -151,6 +156,30 @@ pub fn run_agent(interface: &str, config: OamConfig, control_socket: &Path) -> i
             status.record_tx();
         }
     }
+}
+
+fn active_serial_number(interface: &str) -> io::Result<Option<[u8; 8]>> {
+    let Some(path) = parent_xpon_attribute(interface, "active_serial_number")? else {
+        return Ok(None);
+    };
+    let text = fs::read_to_string(path)?;
+    let text = text.trim();
+    if text == "none" {
+        return Ok(None);
+    }
+    if text.len() != 16 {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "active PON serial number must contain 16 hexadecimal digits",
+        ));
+    }
+    let serial = u64::from_str_radix(text, 16).map_err(|_| {
+        io::Error::new(
+            io::ErrorKind::InvalidData,
+            "active PON serial number contains a non-hex digit",
+        )
+    })?;
+    Ok(Some(serial.to_be_bytes()))
 }
 
 fn publish_service_ready(path: Option<&Path>, ready: bool) {
