@@ -941,3 +941,6 @@ msgstr "Alloc-ID 等待超时"
 
 msgid "Seconds a data path may wait for PLOAM to assign its Alloc-ID before it is reported as failed. The ONU keeps waiting afterwards; 0 disables the timeout."
 msgstr "数据通道等待 PLOAM 分配 Alloc-ID 的秒数，超过后报告失败。之后 ONU 仍会继续等待；0 表示不超时。"
+
+msgid "Optical module"
+msgstr "光模块"
