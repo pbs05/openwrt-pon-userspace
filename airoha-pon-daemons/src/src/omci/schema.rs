@@ -50,6 +50,10 @@ pub const CLASS_VEIP: u16 = 329;
 pub const CLASS_ENHANCED_SECURITY_CONTROL: u16 = 332;
 pub const CLASS_ETHERNET_FRAME_EXTENDED_PM: u16 = 334;
 pub const CLASS_VENDOR_351: u16 = 351;
+pub const CLASS_VENDOR_65330: u16 = 0xff32;
+pub const CLASS_VENDOR_65346: u16 = 0xff42;
+pub const CLASS_CUC_ONU_CAPABILITY: u16 = 0xffb1;
+pub const CLASS_ONU_CAPABILITY: u16 = 0xfff9;
 pub const CLASS_CTC_LOID_AUTH: u16 = 0xfffa;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -639,6 +643,53 @@ const VENDOR_351_ATTRIBUTES: &[AttributeDefinition] = &[
     AttributeDefinition::read_write(2, 2).required(0),
 ];
 
+/* OLT-created Huawei vendor class observed with Create (empty payload) followed
+ * by Set of four one-byte attributes with value 01 01 01 01. */
+const VENDOR_65330_ATTRIBUTES: &[AttributeDefinition] = &[
+    AttributeDefinition::read_write(1, 1),
+    AttributeDefinition::read_write(2, 1),
+    AttributeDefinition::read_write(3, 1),
+    AttributeDefinition::read_write(4, 1),
+];
+
+/* OLT-created Huawei vendor class observed with four empty Create requests and
+ * attribute mask 0x0003. Keep all sixteen attribute slots writable so the OLT
+ * can populate whichever fields its profile uses. */
+const VENDOR_65346_ATTRIBUTES: &[AttributeDefinition] = &[
+    AttributeDefinition::read_write(1, 1),
+    AttributeDefinition::read_write(2, 1),
+    AttributeDefinition::read_write(3, 1),
+    AttributeDefinition::read_write(4, 1),
+    AttributeDefinition::read_write(5, 1),
+    AttributeDefinition::read_write(6, 1),
+    AttributeDefinition::read_write(7, 1),
+    AttributeDefinition::read_write(8, 1),
+    AttributeDefinition::read_write(9, 1),
+    AttributeDefinition::read_write(10, 1),
+    AttributeDefinition::read_write(11, 1),
+    AttributeDefinition::read_write(12, 1),
+    AttributeDefinition::read_write(13, 1),
+    AttributeDefinition::read_write(14, 1),
+    AttributeDefinition::read_write(15, 1),
+    AttributeDefinition::read_write(16, 1),
+];
+
+/* Huawei vendor MEs queried by the OLT during registration. Only attributes
+ * 1 (operator id) and 3 (ONU type) are read in the observed GET mask 0xa000. */
+const CUC_ONU_CAPABILITY_ATTRIBUTES: &[AttributeDefinition] = &[
+    AttributeDefinition::read_only(1, 4),
+    AttributeDefinition::read_only(2, 1),
+    AttributeDefinition::read_only(3, 1),
+    AttributeDefinition::read_only(4, 1),
+];
+
+const ONU_CAPABILITY_ATTRIBUTES: &[AttributeDefinition] = &[
+    AttributeDefinition::read_only(1, 4),
+    AttributeDefinition::read_only(2, 1),
+    AttributeDefinition::read_only(3, 1),
+    AttributeDefinition::read_only(4, 1),
+];
+
 pub static MANAGED_ENTITIES: &[ManagedEntityDefinition] = &[
     ManagedEntityDefinition {
         class_id: CLASS_ONU_DATA,
@@ -938,6 +989,34 @@ pub static MANAGED_ENTITIES: &[ManagedEntityDefinition] = &[
         origin: ManagedEntityOrigin::Olt,
         actions: ACTIONS_PM,
         attributes: VENDOR_351_ATTRIBUTES,
+    },
+    ManagedEntityDefinition {
+        class_id: CLASS_VENDOR_65330,
+        name: "Vendor class 65330",
+        origin: ManagedEntityOrigin::Olt,
+        actions: ACTIONS_OLT_RW,
+        attributes: VENDOR_65330_ATTRIBUTES,
+    },
+    ManagedEntityDefinition {
+        class_id: CLASS_VENDOR_65346,
+        name: "Vendor class 65346",
+        origin: ManagedEntityOrigin::Olt,
+        actions: ACTIONS_OLT_RW,
+        attributes: VENDOR_65346_ATTRIBUTES,
+    },
+    ManagedEntityDefinition {
+        class_id: CLASS_CUC_ONU_CAPABILITY,
+        name: "CUC ONU capability",
+        origin: ManagedEntityOrigin::Onu,
+        actions: ACTIONS_GET,
+        attributes: CUC_ONU_CAPABILITY_ATTRIBUTES,
+    },
+    ManagedEntityDefinition {
+        class_id: CLASS_ONU_CAPABILITY,
+        name: "ONU capability",
+        origin: ManagedEntityOrigin::Onu,
+        actions: ACTIONS_GET,
+        attributes: ONU_CAPABILITY_ATTRIBUTES,
     },
     ManagedEntityDefinition {
         class_id: CLASS_CTC_LOID_AUTH,

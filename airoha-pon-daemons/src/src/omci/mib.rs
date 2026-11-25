@@ -21,7 +21,7 @@ use super::security;
 #[allow(unused_imports)]
 pub use super::schema::{
     CLASS_ANI_G, CLASS_CARDHOLDER, CLASS_CIRCUIT_PACK, CLASS_CTC_LOID_AUTH,
-    CLASS_ENHANCED_SECURITY_CONTROL, CLASS_ETHERNET_FRAME_EXTENDED_PM,
+    CLASS_CUC_ONU_CAPABILITY, CLASS_ENHANCED_SECURITY_CONTROL, CLASS_ETHERNET_FRAME_EXTENDED_PM,
     CLASS_ETHERNET_PM_HISTORY_DATA, CLASS_ETHERNET_PM_HISTORY_DATA_2,
     CLASS_ETHERNET_PM_HISTORY_DATA_3, CLASS_EXTENDED_VLAN_TAGGING, CLASS_FEC_PM_HISTORY_DATA,
     CLASS_GAL_ETHERNET_PROFILE, CLASS_GEM_INTERWORKING_TP, CLASS_GEM_PORT_NETWORK_CTP,
@@ -29,11 +29,12 @@ pub use super::schema::{
     CLASS_MAC_BRIDGE_PORT_FILTER_PREASSIGN_DATA, CLASS_MAC_BRIDGE_PORT_PM_HISTORY_DATA,
     CLASS_MAC_BRIDGE_SERVICE_PROFILE, CLASS_MULTICAST_GEM_INTERWORKING_TP,
     CLASS_MULTICAST_OPERATIONS_PROFILE, CLASS_MULTICAST_SUBSCRIBER_CONFIG,
-    CLASS_MULTICAST_SUBSCRIBER_MONITOR, CLASS_OLT_G, CLASS_OMCI, CLASS_ONU2_G, CLASS_ONU_DATA,
-    CLASS_ONU_G, CLASS_ONU_POWER_SHEDDING, CLASS_PPTP_ETHERNET_UNI, CLASS_PRIORITY_QUEUE,
+    CLASS_MULTICAST_SUBSCRIBER_MONITOR, CLASS_OLT_G, CLASS_OMCI, CLASS_ONU2_G,
+    CLASS_ONU_CAPABILITY, CLASS_ONU_DATA, CLASS_ONU_G, CLASS_ONU_POWER_SHEDDING,
+    CLASS_PPTP_ETHERNET_UNI, CLASS_PRIORITY_QUEUE,
     CLASS_SOFTWARE_IMAGE, CLASS_TCONT, CLASS_THRESHOLD_DATA_1, CLASS_THRESHOLD_DATA_2,
     CLASS_TRAFFIC_DESCRIPTOR, CLASS_TRAFFIC_SCHEDULER, CLASS_UNI_G, CLASS_VEIP, CLASS_VENDOR_247,
-    CLASS_VENDOR_351, CLASS_VLAN_TAGGING_FILTER,
+    CLASS_VENDOR_351, CLASS_VENDOR_65330, CLASS_VENDOR_65346, CLASS_VLAN_TAGGING_FILTER,
 };
 
 const TCONT_COUNT: u16 = 16;
@@ -375,6 +376,28 @@ impl Mib {
                 .read_only(12, vec![0]),
         );
 
+        /* Values copied from the stock HN8546X6-30 MIB (omcicmd mib show):
+         * 0xffb1: CUC\0, spec 3, ONU type 1, power supply 2
+         * 0xfff9: CTC\0, spec 1, ONU type 1, power supply 2 */
+        mib.insert(
+            CLASS_CUC_ONU_CAPABILITY,
+            0,
+            ManagedEntity::default()
+                .read_only(1, b"CUC\0".to_vec())
+                .read_only(2, vec![3])
+                .read_only(3, vec![1])
+                .read_only(4, vec![2]),
+        );
+        mib.insert(
+            CLASS_ONU_CAPABILITY,
+            0,
+            ManagedEntity::default()
+                .read_only(1, b"CTC\0".to_vec())
+                .read_only(2, vec![1])
+                .read_only(3, vec![1])
+                .read_only(4, vec![2]),
+        );
+
         let ctc_auth = ManagedEntity::default()
             .read_only(1, fixed_width(&identity.operator_id, 4))
             .read_only(2, fixed_width(&identity.loid, 24))
@@ -467,6 +490,15 @@ impl Mib {
             0,
             entity_from_definition(CLASS_OLT_G, None).expect("OLT-G schema is registered"),
         );
+
+        /* ANI-G is created by the ONU and must be present in MIB upload. Advertise
+         * the local T-CONT count and the only supported GEM block length (48). */
+        let mut ani_g = entity_from_definition(CLASS_ANI_G, None).expect("ANI-G schema is registered");
+        ani_g.attributes.get_mut(&2).expect("ANI-G T-CONT count").value =
+            TCONT_COUNT.to_be_bytes().to_vec();
+        ani_g.attributes.get_mut(&3).expect("ANI-G GEM block length").value =
+            48u16.to_be_bytes().to_vec();
+        mib.insert(CLASS_ANI_G, 1, ani_g);
 
         for entity_id in 1..=ETHERNET_UNI_COUNT {
             mib.insert(
@@ -1662,7 +1694,7 @@ mod tests {
             .iter()
             .filter(|definition| definition.origin == ManagedEntityOrigin::Olt)
         {
-            let length = definition
+            let Some(length) = definition
                 .attributes
                 .iter()
                 .filter_map(|attribute| match (attribute.create, attribute.kind) {
@@ -1672,7 +1704,11 @@ mod tests {
                     _ => None,
                 })
                 .max()
-                .expect("OLT-created ME has a required create field");
+            else {
+                /* Create may legitimately carry no required fields. */
+                assert!(Mib::dynamic_entity(definition.class_id, &[]).is_some());
+                continue;
+            };
             assert!(Mib::dynamic_entity(definition.class_id, &vec![0; length]).is_some());
             assert!(Mib::dynamic_entity(definition.class_id, &vec![0; length - 1]).is_none());
         }
@@ -2053,5 +2089,102 @@ mod tests {
 
         assert_eq!(mib.dispatch(&set).result(), Some(RESULT_SUCCESS));
         assert_eq!(mib.entities[&filter].attributes[&1].value, value);
+    }
+
+    #[test]
+    fn olt_can_create_vendor_65346_instances() {
+        let mut mib = Mib::from_identity(&IdentityConfig::default());
+        for entity_id in 1..=4 {
+            let create = Request {
+                encoding: super::super::protocol::Encoding::Baseline,
+                tci: 1,
+                message_type: 0x44,
+                action: ACTION_CREATE,
+                class_id: CLASS_VENDOR_65346,
+                entity_id,
+                attribute_mask: 0x0003,
+                payload: &[],
+                content: &[],
+            };
+            assert_eq!(
+                mib.dispatch(&create).result(),
+                Some(RESULT_SUCCESS),
+                "entity {entity_id}"
+            );
+        }
+    }
+
+    #[test]
+    fn olt_can_create_and_configure_vendor_65330() {
+        let mut mib = Mib::from_identity(&IdentityConfig::default());
+        let create = Request {
+            encoding: super::super::protocol::Encoding::Baseline,
+            tci: 1,
+            message_type: 0x44,
+            action: ACTION_CREATE,
+            class_id: CLASS_VENDOR_65330,
+            entity_id: 0,
+            attribute_mask: 0,
+            payload: &[],
+            content: &[],
+        };
+        assert_eq!(mib.dispatch(&create).result(), Some(RESULT_SUCCESS));
+
+        let values = [1u8, 1, 1, 1];
+        let set = Request {
+            message_type: 0x48,
+            action: ACTION_SET,
+            attribute_mask: 0xf000,
+            payload: &values,
+            content: &values,
+            ..create
+        };
+        assert_eq!(mib.dispatch(&set).result(), Some(RESULT_SUCCESS));
+
+        let entity = &mib.entities[&(CLASS_VENDOR_65330, 0)];
+        for index in 1..=4 {
+            assert_eq!(entity.attributes[&index].value, vec![1]);
+        }
+    }
+
+    #[test]
+    fn default_mib_exposes_ani_g_with_matching_tcont_capacity() {
+        let mib = Mib::from_identity(&IdentityConfig::default());
+        let ani_g = &mib.entities[&(CLASS_ANI_G, 1)];
+        assert_eq!(ani_g.attributes[&2].value, TCONT_COUNT.to_be_bytes());
+        assert_eq!(ani_g.attributes[&3].value, 48u16.to_be_bytes());
+    }
+
+    #[test]
+    fn vendor_onu_capability_answers_get_for_operator_and_type() {
+        let mut mib = Mib::from_identity(&IdentityConfig::default());
+
+        for (class_id, operator, spec_version, onu_type) in [
+            (CLASS_CUC_ONU_CAPABILITY, b"CUC\0".as_slice(), 3, 1),
+            (CLASS_ONU_CAPABILITY, b"CTC\0".as_slice(), 1, 1),
+        ] {
+            let get = Request {
+                encoding: super::super::protocol::Encoding::Baseline,
+                tci: 1,
+                message_type: 0x49,
+                action: ACTION_GET,
+                class_id,
+                entity_id: 0,
+                attribute_mask: 0xa000,
+                payload: &[],
+                content: &[],
+            };
+            assert_eq!(
+                mib.dispatch(&get).result(),
+                Some(RESULT_SUCCESS),
+                "class {class_id:#x} must answer the OLT GET"
+            );
+
+            let entity = &mib.entities[&(class_id, 0)];
+            assert_eq!(entity.attributes[&1].value, operator);
+            assert_eq!(entity.attributes[&2].value, vec![spec_version]);
+            assert_eq!(entity.attributes[&3].value, vec![onu_type]);
+            assert_eq!(entity.attributes[&4].value, vec![2]);
+        }
     }
 }
