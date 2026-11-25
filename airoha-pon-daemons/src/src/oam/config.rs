@@ -19,6 +19,19 @@ pub struct OamConfig {
     pub loid: Vec<u8>,
     pub loid_password: Vec<u8>,
     pub ge_ports: u8,
+    /// Region/area code carried in the 54-byte CTC identity block.
+    pub region_code: Vec<u8>,
+    /// Payload returned for the CTC c7/0005 authentication-info query.
+    pub auth_info: Vec<u8>,
+    /// Optional raw 54-byte CTC identity block (c7/0001); overrides the fields above.
+    pub identity_block: Option<Vec<u8>>,
+    /// Publish service_ready once CTC discovery is operational, even if the OLT
+    /// never performs LOID authentication (SN/MAC-only lines).
+    pub force_service_ready: bool,
+    /// Enable Huawei CTC OLT interoperability quirks: 54-byte c7/0001 identity
+    /// block, c7/0002 = 0x0001, c7/0005 auth info, legacy profile SET acks and
+    /// replies to private organization OUIs.
+    pub huawei_compat: bool,
     pub active_serial_number: Option<[u8; 8]>,
 }
 
@@ -38,6 +51,11 @@ impl Default for OamConfig {
             loid: Vec::new(),
             loid_password: Vec::new(),
             ge_ports: 1,
+            region_code: Vec::new(),
+            auth_info: vec![0u8; 10],
+            identity_block: None,
+            force_service_ready: false,
+            huawei_compat: false,
             active_serial_number: None,
         }
     }
@@ -70,6 +88,7 @@ impl OamConfig {
             ("firmware_version", &mut config.firmware_version),
             ("loid", &mut config.loid),
             ("loid_password", &mut config.loid_password),
+            ("region_code", &mut config.region_code),
         ] {
             if let Some(value) = section.option(name).filter(|value| !value.is_empty()) {
                 *destination = value.as_bytes().to_vec();
@@ -85,6 +104,30 @@ impl OamConfig {
             config.ge_ports = value.parse::<u8>().map_err(|_| {
                 io::Error::new(io::ErrorKind::InvalidData, "ge_ports must be an integer")
             })?;
+        }
+        if let Some(value) = section
+            .option("auth_info")
+            .filter(|value| !value.is_empty())
+        {
+            config.auth_info = parse_hex_vec(value.as_bytes(), "auth_info")?;
+        }
+        if let Some(value) = section
+            .option("identity_block")
+            .filter(|value| !value.is_empty())
+        {
+            config.identity_block = Some(parse_hex_vec(value.as_bytes(), "identity_block")?);
+        }
+        if let Some(value) = section
+            .option("force_service_ready")
+            .filter(|value| !value.is_empty())
+        {
+            config.force_service_ready = matches!(value, "1" | "true" | "yes" | "on");
+        }
+        if let Some(value) = section
+            .option("huawei_compat")
+            .filter(|value| !value.is_empty())
+        {
+            config.huawei_compat = matches!(value, "1" | "true" | "yes" | "on");
         }
 
         config.validate()?;
@@ -173,6 +216,30 @@ fn parse_hex_array<const N: usize>(value: &[u8], key: &str) -> io::Result<[u8; N
     Ok(output)
 }
 
+fn parse_hex_vec(value: &[u8], key: &str) -> io::Result<Vec<u8>> {
+    let text = string_value(value, key)?;
+    let text = text.trim_start_matches("0x");
+    if text.len() % 2 != 0 {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("{key} must contain an even number of hexadecimal digits"),
+        ));
+    }
+
+    let mut output = Vec::with_capacity(text.len() / 2);
+    for index in (0..text.len()).step_by(2) {
+        output.push(
+            u8::from_str_radix(&text[index..index + 2], 16).map_err(|_| {
+                io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!("{key} contains a non-hex digit"),
+                )
+            })?,
+        );
+    }
+    Ok(output)
+}
+
 fn parse_versions(value: &[u8]) -> io::Result<Vec<u8>> {
     let text = string_value(value, "ctc_versions")?;
     let mut versions = Vec::new();
@@ -226,6 +293,8 @@ mod tests {
 
         assert_eq!(oam.vendor_id, b"OWRT");
         assert_eq!(oam.chipset_id, [0x00, 0x00, 0x75, 0x81, 0, 0, 0, 0]);
+        assert_eq!(oam.auth_info, vec![0u8; 10]);
+        assert!(oam.identity_block.is_none());
     }
 
     #[test]
@@ -261,5 +330,36 @@ mod tests {
             config.onu_serial([0x02, 0x11, 0x22, 0x33, 0x44, 0x55]),
             *b"OWRT\x22\x33\x44\x55"
         );
+    }
+
+    #[test]
+    fn huawei_compat_is_opt_in() {
+        let config = PonConfig::parse("config oam 'line0_oam'\n\
+             \toption line 'line0'\n")
+        .unwrap();
+        let oam = OamConfig::from_section(config.linked_section("oam", "line0").unwrap()).unwrap();
+        assert!(!oam.huawei_compat);
+
+        let config = PonConfig::parse("config oam 'line0_oam'\n\
+             \toption line 'line0'\n\
+             \toption huawei_compat '1'\n")
+        .unwrap();
+        let oam = OamConfig::from_section(config.linked_section("oam", "line0").unwrap()).unwrap();
+        assert!(oam.huawei_compat);
+    }
+
+    #[test]
+    fn auth_info_and_identity_block_are_parsed_as_hex() {
+        let config = PonConfig::parse(
+            "config oam 'line0_oam'\n\
+             \toption line 'line0'\n\
+             \toption auth_info '314c7e0d19c83f670037'\n\
+             \toption identity_block '0011223344'\n",
+        )
+        .unwrap();
+        let oam = OamConfig::from_section(config.linked_section("oam", "line0").unwrap()).unwrap();
+
+        assert_eq!(oam.auth_info, vec![0x31, 0x4c, 0x7e, 0x0d, 0x19, 0xc8, 0x3f, 0x67, 0x00, 0x37]);
+        assert_eq!(oam.identity_block.unwrap(), vec![0x00, 0x11, 0x22, 0x33, 0x44]);
     }
 }

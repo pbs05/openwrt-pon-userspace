@@ -32,9 +32,17 @@ const LEAF_ONU_SN: u16 = 0x0001;
 const LEAF_FIRMWARE_VERSION: u16 = 0x0002;
 const LEAF_CHIPSET_ID: u16 = 0x0003;
 const LEAF_ONU_CAPABILITIES_1: u16 = 0x0004;
+const LEAF_ONU_AUTH_INFO: u16 = 0x0005;
 const LEAF_ONU_CAPABILITIES_2: u16 = 0x0007;
 const LEAF_ONU_CAPABILITIES_3: u16 = 0x000c;
 const LEAF_VLAN: u16 = 0x0021;
+
+/// Legacy CTC profile/VLAN attributes provisioned by Huawei OLTs before service
+/// is enabled. The stock agent has no state for them; acknowledge them so the
+/// provisioning sequence can finish.
+const LEGACY_PROFILE_LEAVES: &[u16] = &[
+    0x0011, 0x0012, 0x0013, 0x0014, 0x0015, 0x0016, 0x0017, 0x0018, 0x0031, 0x0032, 0x0033,
+];
 
 const SET_OK: u8 = 0x80;
 const BAD_PARAMETERS: u8 = 0x86;
@@ -195,7 +203,35 @@ impl CtcSession {
             return Err("CTC organization PDU is truncated");
         }
         if payload[..3] != config.ctc_oui {
-            return Err("CTC organization PDU has an unexpected OUI");
+            if !config.huawei_compat {
+                return Err("CTC organization PDU has an unexpected OUI");
+            }
+            /* Huawei OLTs address private organization PDUs to their own MAC
+             * prefix (e.g. 00:0f:3e). Answer them instead of dropping: the OLT
+             * retries and never completes authentication while they go
+             * unanswered. */
+            let ext = payload[3];
+            let data = &payload[4..];
+            let resp_ext = match ext {
+                0x01 => 0x02,
+                0x03 => 0x04,
+                _ => {
+                    self.unsupported_requests += 1;
+                    return Ok(OrgOutcome {
+                        response: None,
+                        events: vec![format!("private OUI ext=0x{ext:02x} ignored")],
+                    });
+                }
+            };
+            let mut response = payload[..3].to_vec();
+            response.push(resp_ext);
+            if data.len() >= 3 {
+                response.extend_from_slice(&data[..3]);
+            }
+            return Ok(OrgOutcome {
+                response: Some(response),
+                events: vec![format!("private OUI ext=0x{ext:02x} answered 0x{resp_ext:02x}")],
+            });
         }
         if self.state != DiscoveryState::Operational {
             return Err("CTC organization PDU arrived before version negotiation");
@@ -217,7 +253,7 @@ impl CtcSession {
             }
             OPCODE_SET_REQUEST => {
                 self.set_requests += 1;
-                let outcome = self.handle_set(&payload[4..])?;
+                let outcome = self.handle_set(&payload[4..], config)?;
                 Ok(OrgOutcome {
                     response: Some(with_org_header(
                         config.ctc_oui,
@@ -390,7 +426,7 @@ impl CtcSession {
         })
     }
 
-    fn handle_set(&mut self, data: &[u8]) -> Result<VariableOutcome, &'static str> {
+    fn handle_set(&mut self, data: &[u8], config: &OamConfig) -> Result<VariableOutcome, &'static str> {
         let mut offset = 0;
         let mut object = None;
         let mut object_written = false;
@@ -431,7 +467,7 @@ impl CtcSession {
                 (&data[offset + 4..offset + 4 + width], 4 + width)
             };
 
-            let result = self.set_value(branch, leaf, object, value);
+            let result = self.set_value(branch, leaf, object, value, config);
             events.push(format_variable_event(
                 "SET",
                 object,
@@ -468,11 +504,37 @@ impl CtcSession {
         }
 
         match leaf {
-            LEAF_ONU_SN if object.is_none() => Ok(config.onu_serial(source_mac).to_vec()),
+            LEAF_ONU_SN if object.is_none() => {
+                if let Some(block) = config.identity_block.as_ref() {
+                    return Ok(block.clone());
+                }
+                if !config.huawei_compat {
+                    return Ok(config.onu_serial(source_mac).to_vec());
+                }
+                // Huawei CTC OLTs expect the 54-byte identity block:
+                // SN(8) MAC(6) pad(2) HW(6) pad(3) SW(13) pad(2) region(14).
+                let mut value = Vec::with_capacity(54);
+                value.extend_from_slice(&config.onu_serial(source_mac));
+                value.extend_from_slice(&source_mac);
+                value.extend_from_slice(&[0, 0]);
+                value.extend_from_slice(&fixed_width(&config.hardware_version, 6));
+                value.extend_from_slice(&[0, 0, 0]);
+                value.extend_from_slice(&fixed_width(&config.software_version, 13));
+                value.extend_from_slice(&[0, 0]);
+                value.extend_from_slice(&fixed_width(&config.region_code, 14));
+                Ok(value)
+            }
             LEAF_FIRMWARE_VERSION if object.is_none() => {
-                Ok(config.firmware_version.iter().copied().take(127).collect())
+                if config.huawei_compat {
+                    Ok(vec![0x00, 0x01])
+                } else {
+                    Ok(config.firmware_version.iter().copied().take(127).collect())
+                }
             }
             LEAF_CHIPSET_ID if object.is_none() => Ok(config.chipset_id.to_vec()),
+            LEAF_ONU_AUTH_INFO if object.is_none() && config.huawei_compat => {
+                Ok(config.auth_info.clone())
+            }
             LEAF_ONU_CAPABILITIES_1 if object.is_none() => {
                 let mut value = vec![0; 26];
                 value[0] = 0x01;
@@ -504,7 +566,7 @@ impl CtcSession {
                 // The HGU reports transparent mode and publishes received Set rules for netifd.
                 Ok(vec![0])
             }
-            _ => Err(if leaf == 0x0005 {
+            _ => Err(if leaf == LEAF_ONU_AUTH_INFO {
                 NO_RESOURCE
             } else {
                 BAD_PARAMETERS
@@ -512,27 +574,47 @@ impl CtcSession {
         }
     }
 
-    fn set_value(&mut self, branch: u8, leaf: u16, object: Option<Object>, value: &[u8]) -> u8 {
-        if branch != EXTENDED_ATTRIBUTE || leaf != LEAF_VLAN {
+    fn set_value(
+        &mut self,
+        branch: u8,
+        leaf: u16,
+        object: Option<Object>,
+        value: &[u8],
+        config: &OamConfig,
+    ) -> u8 {
+        if branch == STANDARD_ACTION || branch == EXTENDED_ACTION {
+            return SET_OK;
+        }
+        if branch != EXTENDED_ATTRIBUTE {
             self.unsupported_requests += 1;
             return BAD_PARAMETERS;
         }
         let object = match object {
             Some(object) if object.leaf == OBJECT_LEAF_PORT => object,
-            _ => return BAD_PARAMETERS,
+            _ => {
+                self.unsupported_requests += 1;
+                return BAD_PARAMETERS;
+            }
         };
-        let mode = match value.first().copied() {
-            Some(mode @ 0..=4) => mode,
-            _ => return BAD_PARAMETERS,
-        };
+        if leaf == LEAF_VLAN {
+            let mode = match value.first().copied() {
+                Some(mode @ 0..=4) => mode,
+                _ => return BAD_PARAMETERS,
+            };
 
-        // The HGU data path preserves OLT-provisioned tags for Linux VLAN and netifd policy.
-        self.vlan = Some(VlanConfiguration {
-            object_index: object.index,
-            mode,
-            raw: value.to_vec(),
-        });
-        SET_OK
+            // The HGU data path preserves OLT-provisioned tags for Linux VLAN and netifd policy.
+            self.vlan = Some(VlanConfiguration {
+                object_index: object.index,
+                mode,
+                raw: value.to_vec(),
+            });
+            return SET_OK;
+        }
+        if config.huawei_compat && LEGACY_PROFILE_LEAVES.contains(&leaf) {
+            return SET_OK;
+        }
+        self.unsupported_requests += 1;
+        BAD_PARAMETERS
     }
 }
 
@@ -681,7 +763,9 @@ mod tests {
             0x00,
         ];
 
-        let outcome = session.handle_set(&request).expect("valid VLAN SET");
+        let outcome = session
+            .handle_set(&request, &OamConfig::default())
+            .expect("valid VLAN SET");
 
         assert_eq!(outcome.events.len(), 1);
         assert_eq!(
@@ -697,13 +781,70 @@ mod tests {
         let mut session = CtcSession::new();
         let request = [EXTENDED_ATTRIBUTE, 0x00, 0x22, 0x01, 0x00, 0x00];
 
-        let outcome = session.handle_set(&request).expect("well-formed SET");
+        let outcome = session
+            .handle_set(&request, &OamConfig::default())
+            .expect("well-formed SET");
 
         assert_eq!(outcome.events.len(), 1);
         assert_eq!(
             outcome.events[0],
             "CTC SET object=global branch=0xc7 leaf=0x0022 length=1 result=0x86 value=00"
         );
-        assert_eq!(session.unsupported_requests, 1);
+        assert_eq!(session.snapshot().unsupported_requests, 1);
+    }
+
+    #[test]
+    fn legacy_profile_set_is_acknowledged() {
+        let mut session = CtcSession::new();
+        let request = [
+            OBJECT_BRANCH_V1,
+            0x00,
+            0x01,
+            0x01,
+            0x01,
+            EXTENDED_ATTRIBUTE,
+            0x00,
+            0x12,
+            0x01,
+            0x00,
+        ];
+
+        let mut config = OamConfig::default();
+        config.huawei_compat = true;
+        let outcome = session
+            .handle_set(&request, &config)
+            .expect("valid legacy SET");
+
+        assert_eq!(outcome.events.len(), 1);
+        assert!(outcome.events[0].contains("result=0x80"));
+        assert_eq!(session.snapshot().unsupported_requests, 0);
+    }
+
+    #[test]
+    fn onu_identity_block_is_54_bytes_and_uses_firmware_answer() {
+        let mut config = OamConfig::default();
+        config.huawei_compat = true;
+        config.hardware_version = b"627.A".to_vec();
+        config.software_version = b"V3R016C10S135".to_vec();
+        config.region_code = b"TEST_REGION_01".to_vec();
+        config.active_serial_number = Some(*b"HWTC4D5C");
+
+        let session = CtcSession::new();
+        let value = session
+            .get_value(
+                EXTENDED_ATTRIBUTE,
+                LEAF_ONU_SN,
+                None,
+                &config,
+                [0x80, 0xd4, 0xa5, 0x4d, 0x5c, 0x17],
+            )
+            .expect("identity block");
+
+        assert_eq!(value.len(), 54);
+        assert_eq!(&value[..8], b"HWTC4D5C");
+        assert_eq!(&value[8..14], &[0x80u8, 0xd4, 0xa5, 0x4d, 0x5c, 0x17]);
+        assert_eq!(&value[16..22], b"627.A\x00");
+        assert_eq!(&value[25..38], b"V3R016C10S13");
+        assert_eq!(&value[40..54], b"TEST_REGION_01");
     }
 }
