@@ -38,6 +38,7 @@ pub fn run_agent(
     let service_ready = parent_xpon_attribute(interface, "service_ready")?;
     publish_service_ready(service_ready.as_deref(), false);
     let mut published_service_ready = false;
+    let force_service_ready = config.force_service_ready;
     let mut ieee = IeeeSession::new();
     let mut ctc = CtcSession::new();
     let status = StatusHub::new(
@@ -138,7 +139,8 @@ pub fn run_agent(
             }
         };
         let ctc_snapshot = ctc.snapshot();
-        let current_service_ready = ctc_snapshot.authentication == "accepted";
+        let current_service_ready = ctc_snapshot.authentication == "accepted"
+            || (force_service_ready && ctc_snapshot.discovery_state == "operational");
         if current_service_ready != published_service_ready {
             publish_service_ready(service_ready.as_deref(), current_service_ready);
             published_service_ready = current_service_ready;
