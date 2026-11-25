@@ -34,7 +34,7 @@ pub use super::schema::{
     CLASS_PPTP_ETHERNET_UNI, CLASS_PRIORITY_QUEUE,
     CLASS_SOFTWARE_IMAGE, CLASS_TCONT, CLASS_THRESHOLD_DATA_1, CLASS_THRESHOLD_DATA_2,
     CLASS_TRAFFIC_DESCRIPTOR, CLASS_TRAFFIC_SCHEDULER, CLASS_UNI_G, CLASS_VEIP, CLASS_VENDOR_247,
-    CLASS_VENDOR_351, CLASS_VLAN_TAGGING_FILTER,
+    CLASS_VENDOR_351, CLASS_VENDOR_65330, CLASS_VENDOR_65346, CLASS_VLAN_TAGGING_FILTER,
 };
 
 const TCONT_COUNT: u16 = 16;
@@ -1694,7 +1694,7 @@ mod tests {
             .iter()
             .filter(|definition| definition.origin == ManagedEntityOrigin::Olt)
         {
-            let length = definition
+            let Some(length) = definition
                 .attributes
                 .iter()
                 .filter_map(|attribute| match (attribute.create, attribute.kind) {
@@ -1704,7 +1704,11 @@ mod tests {
                     _ => None,
                 })
                 .max()
-                .expect("OLT-created ME has a required create field");
+            else {
+                /* Create may legitimately carry no required fields. */
+                assert!(Mib::dynamic_entity(definition.class_id, &[]).is_some());
+                continue;
+            };
             assert!(Mib::dynamic_entity(definition.class_id, &vec![0; length]).is_some());
             assert!(Mib::dynamic_entity(definition.class_id, &vec![0; length - 1]).is_none());
         }
@@ -2085,6 +2089,62 @@ mod tests {
 
         assert_eq!(mib.dispatch(&set).result(), Some(RESULT_SUCCESS));
         assert_eq!(mib.entities[&filter].attributes[&1].value, value);
+    }
+
+    #[test]
+    fn olt_can_create_vendor_65346_instances() {
+        let mut mib = Mib::from_identity(&IdentityConfig::default());
+        for entity_id in 1..=4 {
+            let create = Request {
+                encoding: super::super::protocol::Encoding::Baseline,
+                tci: 1,
+                message_type: 0x44,
+                action: ACTION_CREATE,
+                class_id: CLASS_VENDOR_65346,
+                entity_id,
+                attribute_mask: 0x0003,
+                payload: &[],
+                content: &[],
+            };
+            assert_eq!(
+                mib.dispatch(&create).result(),
+                Some(RESULT_SUCCESS),
+                "entity {entity_id}"
+            );
+        }
+    }
+
+    #[test]
+    fn olt_can_create_and_configure_vendor_65330() {
+        let mut mib = Mib::from_identity(&IdentityConfig::default());
+        let create = Request {
+            encoding: super::super::protocol::Encoding::Baseline,
+            tci: 1,
+            message_type: 0x44,
+            action: ACTION_CREATE,
+            class_id: CLASS_VENDOR_65330,
+            entity_id: 0,
+            attribute_mask: 0,
+            payload: &[],
+            content: &[],
+        };
+        assert_eq!(mib.dispatch(&create).result(), Some(RESULT_SUCCESS));
+
+        let values = [1u8, 1, 1, 1];
+        let set = Request {
+            message_type: 0x48,
+            action: ACTION_SET,
+            attribute_mask: 0xf000,
+            payload: &values,
+            content: &values,
+            ..create
+        };
+        assert_eq!(mib.dispatch(&set).result(), Some(RESULT_SUCCESS));
+
+        let entity = &mib.entities[&(CLASS_VENDOR_65330, 0)];
+        for index in 1..=4 {
+            assert_eq!(entity.attributes[&index].value, vec![1]);
+        }
     }
 
     #[test]
