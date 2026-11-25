@@ -50,6 +50,8 @@ pub const CLASS_VEIP: u16 = 329;
 pub const CLASS_ENHANCED_SECURITY_CONTROL: u16 = 332;
 pub const CLASS_ETHERNET_FRAME_EXTENDED_PM: u16 = 334;
 pub const CLASS_VENDOR_351: u16 = 351;
+pub const CLASS_CUC_ONU_CAPABILITY: u16 = 0xffb1;
+pub const CLASS_ONU_CAPABILITY: u16 = 0xfff9;
 pub const CLASS_CTC_LOID_AUTH: u16 = 0xfffa;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -639,6 +641,22 @@ const VENDOR_351_ATTRIBUTES: &[AttributeDefinition] = &[
     AttributeDefinition::read_write(2, 2).required(0),
 ];
 
+/* Huawei vendor MEs queried by the OLT during registration. Only attributes
+ * 1 (operator id) and 3 (ONU type) are read in the observed GET mask 0xa000. */
+const CUC_ONU_CAPABILITY_ATTRIBUTES: &[AttributeDefinition] = &[
+    AttributeDefinition::read_only(1, 4),
+    AttributeDefinition::read_only(2, 1),
+    AttributeDefinition::read_only(3, 1),
+    AttributeDefinition::read_only(4, 1),
+];
+
+const ONU_CAPABILITY_ATTRIBUTES: &[AttributeDefinition] = &[
+    AttributeDefinition::read_only(1, 4),
+    AttributeDefinition::read_only(2, 1),
+    AttributeDefinition::read_only(3, 1),
+    AttributeDefinition::read_only(4, 1),
+];
+
 pub static MANAGED_ENTITIES: &[ManagedEntityDefinition] = &[
     ManagedEntityDefinition {
         class_id: CLASS_ONU_DATA,
@@ -938,6 +956,20 @@ pub static MANAGED_ENTITIES: &[ManagedEntityDefinition] = &[
         origin: ManagedEntityOrigin::Olt,
         actions: ACTIONS_PM,
         attributes: VENDOR_351_ATTRIBUTES,
+    },
+    ManagedEntityDefinition {
+        class_id: CLASS_CUC_ONU_CAPABILITY,
+        name: "CUC ONU capability",
+        origin: ManagedEntityOrigin::Onu,
+        actions: ACTIONS_GET,
+        attributes: CUC_ONU_CAPABILITY_ATTRIBUTES,
+    },
+    ManagedEntityDefinition {
+        class_id: CLASS_ONU_CAPABILITY,
+        name: "ONU capability",
+        origin: ManagedEntityOrigin::Onu,
+        actions: ACTIONS_GET,
+        attributes: ONU_CAPABILITY_ATTRIBUTES,
     },
     ManagedEntityDefinition {
         class_id: CLASS_CTC_LOID_AUTH,
